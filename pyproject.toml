@@ -32,7 +32,7 @@ dev = [
 ]
 
 [project.entry-points."amplifier.modules"]
-hooks-ui-bridge = "amplifier_module_hooks_ui_bridge"
+hooks-ui-bridge = "amplifier_module_hooks_ui_bridge:mount"
 
 [build-system]
 requires = ["hatchling"]
