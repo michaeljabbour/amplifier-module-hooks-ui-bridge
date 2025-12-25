@@ -268,7 +268,12 @@ async def mount(coordinator: Any, config: dict[str, Any]) -> None:
     async def on_tool_post(event: str, data: dict) -> HookResult:
         await _bridge.handle_event("tool:post", data)
         return HookResult(action="continue")
-    
+
+    async def on_orchestrator_complete(event: str, data: dict) -> HookResult:
+        """Handle orchestrator:complete event with complete response content."""
+        await _bridge.handle_event("orchestrator:complete", data)
+        return HookResult(action="continue")
+
     # Register handlers
     coordinator.hooks.register("session:start", on_session_start)
     coordinator.hooks.register("session:end", on_session_end)
@@ -276,6 +281,7 @@ async def mount(coordinator: Any, config: dict[str, Any]) -> None:
     coordinator.hooks.register("content_block:end", on_content_block_end)
     coordinator.hooks.register("tool:pre", on_tool_pre)
     coordinator.hooks.register("tool:post", on_tool_post)
+    coordinator.hooks.register("orchestrator:complete", on_orchestrator_complete)
     
     logger.info(f"Mounted hooks-ui-bridge with {transport_type} transport")
 

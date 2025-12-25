@@ -362,33 +362,12 @@ class UIBridge:
 
                     return event
 
-                # Handle text block end - emit MESSAGE_END with the response content
-                if block_type == "text":
-                    text_content = block.get("text", "")
-                    if text_content:
-                        # Also emit token usage if present
-                        if usage:
-                            import asyncio
-                            asyncio.create_task(self.emit(UIEvent(
-                                type=EventTypes.TOKEN_USAGE,
-                                timestamp=datetime.now(),
-                                data={
-                                    "input_tokens": usage.get("input_tokens", 0),
-                                    "output_tokens": usage.get("output_tokens", 0),
-                                },
-                                session_id=session_id,
-                                agent_name=agent_name,
-                            )))
+                # Note: TEXT blocks are NOT converted to MESSAGE_END here.
+                # MESSAGE_END is emitted by the message:end handler which receives
+                # the canonical event from the orchestrator with the complete response.
+                # This avoids duplicates and fragmentation from per-block events.
 
-                        return UIEvent(
-                            type=EventTypes.MESSAGE_END,
-                            timestamp=datetime.now(),
-                            data={"content": text_content},
-                            session_id=session_id,
-                            agent_name=agent_name,
-                        )
-
-                # Token usage on other blocks (no content)
+                # Token usage on non-thinking blocks
                 if usage:
                     return UIEvent(
                         type=EventTypes.TOKEN_USAGE,
@@ -460,7 +439,28 @@ class UIBridge:
                     session_id=session_id,
                     agent_name=agent_name,
                 )
-            
+
+            case "orchestrator:complete":
+                # Canonical event from orchestrator with complete assistant response
+                # This is the single source of truth for MESSAGE_END (no duplicates)
+                # Uses the standard Amplifier event instead of custom message:end
+                content = data.get("content", "")
+                if content:
+                    return UIEvent(
+                        type=EventTypes.MESSAGE_END,
+                        timestamp=datetime.now(),
+                        data={
+                            "content": content,
+                            "role": data.get("role", "assistant"),
+                            "turn_count": data.get("turn_count"),
+                            "status": data.get("status"),
+                            "orchestrator": data.get("orchestrator"),
+                        },
+                        session_id=session_id,
+                        agent_name=agent_name,
+                    )
+                return None
+
             case _:
                 # Handle error events
                 if event_name.startswith("error"):
