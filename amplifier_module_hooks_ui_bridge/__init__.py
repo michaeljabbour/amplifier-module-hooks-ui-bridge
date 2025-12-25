@@ -282,7 +282,7 @@ async def mount(coordinator: Any, config: dict[str, Any]) -> None:
     coordinator.hooks.register("tool:pre", on_tool_pre)
     coordinator.hooks.register("tool:post", on_tool_post)
     coordinator.hooks.register("orchestrator:complete", on_orchestrator_complete)
-    
+
     logger.info(f"Mounted hooks-ui-bridge with {transport_type} transport")
 
 

@@ -35,7 +35,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 # Configuration presets
 PRESETS = {
     "minimal": ["tool:post", "error:*"],
-    "standard": ["session:*", "content_block:*", "tool:*", "token_usage"],
+    "standard": ["session:*", "content_block:*", "tool:*", "token_usage", "orchestrator:*"],
     "verbose": ["*"],
     "debug": ["*"],
 }
@@ -100,6 +100,7 @@ class UIBridge:
         self._command_handlers: dict[str, Callable] = {}
         self._history: list[UIEvent] = []
         self._adapter = None
+        # Note: pending_events is now per-invocation (local to handle_event) for concurrency safety
     
     def set_adapter(self, adapter) -> None:
         """Set the transport adapter.
@@ -196,21 +197,25 @@ class UIBridge:
     
     async def handle_event(self, event_name: str, data: dict[str, Any]) -> UIEvent | None:
         """Handle an Amplifier event and emit UIEvent(s).
-        
+
         Args:
             event_name: Amplifier event name (e.g., "tool:pre")
             data: Event data from Amplifier
-            
+
         Returns:
             The emitted UIEvent, or None if filtered/skipped
         """
         # Check if event matches our filter patterns
         if not self._should_handle(event_name):
             return None
-        
+
+        # Per-invocation pending events list for concurrency safety
+        # (avoids race conditions when multiple handle_event calls are in flight)
+        pending_events: list[UIEvent] = []
+
         # Find matching handlers (custom first, then default)
         handlers = self._get_matching_handlers(event_name)
-        
+
         ui_event = None
         for handler in handlers:
             try:
@@ -220,14 +225,14 @@ class UIBridge:
                     break
             except Exception as e:
                 logger.error(f"Handler error for {event_name}: {e}")
-        
-        # Fall back to default handler
+
+        # Fall back to default handler (pass pending_events for it to populate)
         if ui_event is None:
-            ui_event = self.default_handler(event_name, data)
-        
+            ui_event = self.default_handler(event_name, data, pending_events)
+
         if ui_event is None:
             return None
-        
+
         # Apply filters
         for f in self._filters:
             try:
@@ -235,16 +240,22 @@ class UIBridge:
                     return None
             except Exception as e:
                 logger.error(f"Filter error: {e}")
-        
+
         # Apply transformers
         for t in self._transformers:
             try:
                 ui_event = t(ui_event)
             except Exception as e:
                 logger.error(f"Transformer error: {e}")
-        
-        # Emit
+
+        # Emit primary event
         await self.emit(ui_event)
+
+        # Emit any pending events (e.g., token_usage after thinking_end)
+        # This ensures correct ordering without using asyncio.create_task
+        for pending_event in pending_events:
+            await self.emit(pending_event)
+
         return ui_event
     
     def _should_handle(self, event_name: str) -> bool:
@@ -267,13 +278,20 @@ class UIBridge:
     # Default Handlers
     # ─────────────────────────────────────────────────────────────────────────
     
-    def default_handler(self, event_name: str, data: dict[str, Any]) -> UIEvent | None:
+    def default_handler(
+        self,
+        event_name: str,
+        data: dict[str, Any],
+        pending_events: list[UIEvent] | None = None,
+    ) -> UIEvent | None:
         """Create default UIEvent for an Amplifier event.
-        
+
         Args:
             event_name: Amplifier event name
             data: Event data
-            
+            pending_events: Optional list to append follow-up events to
+                           (e.g., token_usage after thinking_end)
+
         Returns:
             UIEvent or None if event should be skipped
         """
@@ -345,11 +363,10 @@ class UIBridge:
                         agent_name=agent_name,
                     )
 
-                    # Also emit token usage if present
-                    if usage:
-                        # Schedule token usage event
-                        import asyncio
-                        asyncio.create_task(self.emit(UIEvent(
+                    # Queue token usage event to emit after the primary event
+                    # This ensures correct ordering (thinking_end, then token_usage)
+                    if usage and pending_events is not None:
+                        pending_events.append(UIEvent(
                             type=EventTypes.TOKEN_USAGE,
                             timestamp=datetime.now(),
                             data={
@@ -358,7 +375,7 @@ class UIBridge:
                             },
                             session_id=session_id,
                             agent_name=agent_name,
-                        )))
+                        ))
 
                     return event
 
