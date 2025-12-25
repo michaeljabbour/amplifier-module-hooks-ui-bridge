@@ -327,12 +327,12 @@ class UIBridge:
                 block = data.get("block", {})
                 block_type = block.get("type")
                 usage = data.get("usage")
-                
+
                 # Handle thinking block end
                 if block_type in {"thinking", "reasoning"} and display.get("show_thinking"):
                     parent_id = self._thinking_events.pop(block_index, None)
                     thinking_text = block.get("thinking", "") or block.get("text", "")
-                    
+
                     event = UIEvent(
                         type=EventTypes.THINKING_END,
                         timestamp=datetime.now(),
@@ -344,7 +344,7 @@ class UIBridge:
                         session_id=session_id,
                         agent_name=agent_name,
                     )
-                    
+
                     # Also emit token usage if present
                     if usage:
                         # Schedule token usage event
@@ -359,10 +359,36 @@ class UIBridge:
                             session_id=session_id,
                             agent_name=agent_name,
                         )))
-                    
+
                     return event
-                
-                # Token usage on non-thinking blocks
+
+                # Handle text block end - emit MESSAGE_END with the response content
+                if block_type == "text":
+                    text_content = block.get("text", "")
+                    if text_content:
+                        # Also emit token usage if present
+                        if usage:
+                            import asyncio
+                            asyncio.create_task(self.emit(UIEvent(
+                                type=EventTypes.TOKEN_USAGE,
+                                timestamp=datetime.now(),
+                                data={
+                                    "input_tokens": usage.get("input_tokens", 0),
+                                    "output_tokens": usage.get("output_tokens", 0),
+                                },
+                                session_id=session_id,
+                                agent_name=agent_name,
+                            )))
+
+                        return UIEvent(
+                            type=EventTypes.MESSAGE_END,
+                            timestamp=datetime.now(),
+                            data={"content": text_content},
+                            session_id=session_id,
+                            agent_name=agent_name,
+                        )
+
+                # Token usage on other blocks (no content)
                 if usage:
                     return UIEvent(
                         type=EventTypes.TOKEN_USAGE,
@@ -374,7 +400,7 @@ class UIBridge:
                         session_id=session_id,
                         agent_name=agent_name,
                     )
-                
+
                 return None
             
             case "tool:pre":
