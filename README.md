@@ -15,7 +15,7 @@ Amplifier Events ──► UIEvent (JSON) ──► Transport Adapters ──►
 
 ```bash
 # From git
-amplifier module add git+https://github.com/microsoft/amplifier-module-hooks-ui-bridge
+amplifier module add git+https://github.com/michaeljabbour/amplifier-module-hooks-ui-bridge
 
 # Or with uv
 uv add amplifier-module-hooks-ui-bridge
