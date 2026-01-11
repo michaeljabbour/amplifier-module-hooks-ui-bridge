@@ -29,7 +29,8 @@ class UIEvent:
         data: Event-specific payload
         event_id: Unique identifier for this event
         parent_event_id: For correlating start/end pairs (e.g., tool_start → tool_result)
-        session_id: Associated session ID
+        session_id: Associated Amplifier session ID
+        conversation_id: UI conversation thread ID (for multi-conversation UIs)
         agent_name: Sub-agent name (for delegated tasks)
         hints: Platform-specific hints (priority, ephemeral, silent)
     """
@@ -40,6 +41,7 @@ class UIEvent:
     event_id: str = field(default_factory=lambda: str(uuid4()))
     parent_event_id: str | None = None
     session_id: str | None = None
+    conversation_id: str | None = None
     agent_name: str | None = None
     hints: dict[str, Any] | None = None
     
@@ -55,6 +57,8 @@ class UIEvent:
             d["parent_event_id"] = self.parent_event_id
         if self.session_id:
             d["session_id"] = self.session_id
+        if self.conversation_id:
+            d["conversation_id"] = self.conversation_id
         if self.agent_name:
             d["agent_name"] = self.agent_name
         if self.hints:
@@ -75,6 +79,7 @@ class UIEvent:
             event_id=d.get("event_id", str(uuid4())),
             parent_event_id=d.get("parent_event_id"),
             session_id=d.get("session_id"),
+            conversation_id=d.get("conversation_id"),
             agent_name=d.get("agent_name"),
             hints=d.get("hints"),
         )
@@ -127,43 +132,6 @@ class UICommand:
     def from_json(cls, s: str) -> UICommand:
         """Create UICommand from JSON string."""
         return cls.from_dict(json.loads(s))
-
-
-# Event type constants for type safety
-class EventTypes:
-    """Standard event type constants."""
-    
-    # Session lifecycle
-    SESSION_START = "session_start"
-    SESSION_END = "session_end"
-    SESSION_ERROR = "session_error"
-    
-    # Thinking/reasoning
-    THINKING_START = "thinking_start"
-    THINKING_CHUNK = "thinking_chunk"
-    THINKING_END = "thinking_end"
-    
-    # Tool execution
-    TOOL_START = "tool_start"
-    TOOL_PROGRESS = "tool_progress"
-    TOOL_RESULT = "tool_result"
-    
-    # Message streaming
-    MESSAGE_START = "message_start"
-    MESSAGE_CHUNK = "message_chunk"
-    MESSAGE_END = "message_end"
-    
-    # Metadata
-    TOKEN_USAGE = "token_usage"
-    CONTEXT_UPDATE = "context_update"
-    
-    # Notifications
-    NOTIFICATION = "notification"
-    ERROR = "error"
-    
-    # Command responses
-    COMMAND_RESULT = "command_result"
-    COMMAND_ERROR = "command_error"
 
 
 class CommandTypes:

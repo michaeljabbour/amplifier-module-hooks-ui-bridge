@@ -6,6 +6,8 @@ them through the configured adapter. It supports:
 - Custom event handlers
 - Event transformation pipeline
 - Bidirectional command handling
+- Multiple event modes (native, ui_friendly, both)
+- Event enrichers for app-specific event emission
 """
 
 from __future__ import annotations
@@ -16,7 +18,8 @@ from datetime import datetime
 from typing import Any, Callable
 from uuid import uuid4
 
-from .schema import EventTypes, UIEvent
+from .events import NativeEventTypes, UIEventTypes
+from .schema import UIEvent
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 # Configuration presets
 PRESETS = {
     "minimal": ["tool:post", "error:*"],
-    "standard": ["session:*", "content_block:*", "tool:*", "token_usage", "orchestrator:*"],
+    "standard": ["session:*", "content_block:*", "tool:*", "token_usage", "orchestrator:*", "thinking:*"],
     "verbose": ["*"],
     "debug": ["*"],
 }
@@ -43,6 +46,7 @@ PRESETS = {
 DEFAULT_CONFIG: dict[str, Any] = {
     "events": PRESETS["standard"],
     "preset": None,
+    "event_mode": "ui_friendly",  # "native" | "ui_friendly" | "both"
     "display": {
         "show_thinking": True,
         "show_tool_arguments": True,
@@ -69,7 +73,13 @@ class UIBridge:
     1. Receives Amplifier events (tool:pre, content_block:end, etc.)
     2. Transforms them into UIEvent objects
     3. Applies filters and transformers
-    4. Emits through the configured adapter
+    4. Runs enrichers for app-specific additional events
+    5. Emits through the configured adapter
+    
+    Event Modes:
+        - "native": Pass-through amplifier-core event names (content_block:delta, tool:pre)
+        - "ui_friendly": Semantic UI events (thinking_start, tool_result) - default
+        - "both": Emit both native and ui_friendly events
     
     Attributes:
         config: Bridge configuration
@@ -81,6 +91,10 @@ class UIBridge:
         
         Args:
             config: Configuration dict (merged with defaults)
+                - event_mode: "native" | "ui_friendly" | "both"
+                - events: List of event patterns to handle
+                - preset: Preset name ("minimal", "standard", "verbose", "debug")
+                - display: Display options (show_thinking, truncate_output, etc.)
         """
         # Deep merge with defaults
         self.config = _deep_merge(DEFAULT_CONFIG, config or {})
@@ -97,10 +111,25 @@ class UIBridge:
         self._filters: list[Callable[[UIEvent], bool]] = []
         self._transformers: list[Callable[[UIEvent], UIEvent]] = []
         self._handlers: dict[str, list[Callable]] = {}
+        self._enrichers: list[tuple[str, Callable]] = []  # (pattern, enricher_fn)
         self._command_handlers: dict[str, Callable] = {}
         self._history: list[UIEvent] = []
         self._adapter = None
-        # Note: pending_events is now per-invocation (local to handle_event) for concurrency safety
+    
+    @property
+    def event_mode(self) -> str:
+        """Get the current event mode."""
+        return self.config.get("event_mode", "ui_friendly")
+    
+    @property
+    def is_native_mode(self) -> bool:
+        """Check if native events should be emitted."""
+        return self.event_mode in ("native", "both")
+    
+    @property
+    def is_ui_friendly_mode(self) -> bool:
+        """Check if ui_friendly events should be emitted."""
+        return self.event_mode in ("ui_friendly", "both")
     
     def set_adapter(self, adapter) -> None:
         """Set the transport adapter.
@@ -110,12 +139,15 @@ class UIBridge:
         """
         self._adapter = adapter
     
-    # ─────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────────────
     # Handler Registration
-    # ─────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────────────
     
     def on(self, event_pattern: str):
         """Decorator to register an event handler.
+        
+        Handlers intercept events BEFORE the default handler runs.
+        Return a UIEvent to override, or None to fall back to default.
         
         Args:
             event_pattern: Event name or glob pattern (e.g., "tool:*")
@@ -145,6 +177,32 @@ class UIBridge:
                 h for h in self._handlers[event_pattern] if h != handler
             ]
     
+    def enrich(self, event_pattern: str):
+        """Decorator to register an event enricher.
+        
+        Enrichers run AFTER the default handler and can emit additional events.
+        Use this for app-specific events (e.g., todo_update for amplifier-desktop).
+        
+        Args:
+            event_pattern: Event name or glob pattern (e.g., "tool:post")
+        
+        Example:
+            @bridge.enrich("tool:post")
+            async def todo_enricher(event_name: str, data: dict, ui_event: UIEvent) -> list[UIEvent]:
+                if data.get("tool_name") != "todo":
+                    return []
+                return [UIEvent(
+                    type="todo_update",
+                    timestamp=datetime.now(),
+                    data={"todos": parse_todos(data)},
+                    session_id=ui_event.session_id,
+                )]
+        """
+        def decorator(fn: Callable) -> Callable:
+            self._enrichers.append((event_pattern, fn))
+            return fn
+        return decorator
+    
     def on_command(self, command_type: str):
         """Decorator to register a command handler.
         
@@ -162,9 +220,9 @@ class UIBridge:
             return fn
         return decorator
     
-    # ─────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────────────
     # Pipeline Customization
-    # ─────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────────────
     
     def filter(self, fn: Callable[[UIEvent], bool]) -> Callable:
         """Add a filter to the event pipeline.
@@ -191,9 +249,9 @@ class UIBridge:
         self._transformers.append(fn)
         return fn
     
-    # ─────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────────────
     # Event Handling
-    # ─────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────────────
     
     async def handle_event(self, event_name: str, data: dict[str, Any]) -> UIEvent | None:
         """Handle an Amplifier event and emit UIEvent(s).
@@ -203,14 +261,13 @@ class UIBridge:
             data: Event data from Amplifier
 
         Returns:
-            The emitted UIEvent, or None if filtered/skipped
+            The primary emitted UIEvent, or None if filtered/skipped
         """
         # Check if event matches our filter patterns
         if not self._should_handle(event_name):
             return None
 
         # Per-invocation pending events list for concurrency safety
-        # (avoids race conditions when multiple handle_event calls are in flight)
         pending_events: list[UIEvent] = []
 
         # Find matching handlers (custom first, then default)
@@ -226,7 +283,7 @@ class UIBridge:
             except Exception as e:
                 logger.error(f"Handler error for {event_name}: {e}")
 
-        # Fall back to default handler (pass pending_events for it to populate)
+        # Fall back to default handler
         if ui_event is None:
             ui_event = self.default_handler(event_name, data, pending_events)
 
@@ -252,11 +309,30 @@ class UIBridge:
         await self.emit(ui_event)
 
         # Emit any pending events (e.g., token_usage after thinking_end)
-        # This ensures correct ordering without using asyncio.create_task
         for pending_event in pending_events:
             await self.emit(pending_event)
 
+        # Run enrichers to emit additional app-specific events
+        enriched_events = await self._run_enrichers(event_name, data, ui_event)
+        for enriched_event in enriched_events:
+            await self.emit(enriched_event)
+
         return ui_event
+    
+    async def _run_enrichers(
+        self, event_name: str, data: dict[str, Any], ui_event: UIEvent
+    ) -> list[UIEvent]:
+        """Run matching enrichers and collect additional events."""
+        additional_events = []
+        for pattern, enricher in self._enrichers:
+            if fnmatch.fnmatch(event_name, pattern):
+                try:
+                    events = await enricher(event_name, data, ui_event)
+                    if events:
+                        additional_events.extend(events)
+                except Exception as e:
+                    logger.error(f"Enricher error for {event_name}: {e}")
+        return additional_events
     
     def _should_handle(self, event_name: str) -> bool:
         """Check if event matches configured patterns."""
@@ -274,9 +350,9 @@ class UIBridge:
                 handlers.extend(pattern_handlers)
         return handlers
     
-    # ─────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────────────
     # Default Handlers
-    # ─────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────────────
     
     def default_handler(
         self,
@@ -286,11 +362,12 @@ class UIBridge:
     ) -> UIEvent | None:
         """Create default UIEvent for an Amplifier event.
 
+        Respects event_mode config to emit native or ui_friendly event types.
+
         Args:
             event_name: Amplifier event name
             data: Event data
             pending_events: Optional list to append follow-up events to
-                           (e.g., token_usage after thinking_end)
 
         Returns:
             UIEvent or None if event should be skipped
@@ -305,10 +382,208 @@ class UIBridge:
         
         session_id = data.get("session_id")
         
+        # Dispatch to appropriate handler based on event_mode
+        if self.is_native_mode:
+            return self._handle_native(event_name, data, pending_events, session_id, agent_name, display)
+        else:
+            return self._handle_ui_friendly(event_name, data, pending_events, session_id, agent_name, display)
+    
+    def _handle_native(
+        self,
+        event_name: str,
+        data: dict[str, Any],
+        pending_events: list[UIEvent] | None,
+        session_id: str | None,
+        agent_name: str | None,
+        display: dict[str, Any],
+    ) -> UIEvent | None:
+        """Handle event in native mode - pass through amplifier-core event names."""
         match event_name:
             case "session:start":
                 return UIEvent(
-                    type=EventTypes.SESSION_START,
+                    type=NativeEventTypes.SESSION_START,
+                    timestamp=datetime.now(),
+                    data={"prompt": data.get("prompt", "")},
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+            
+            case "session:end":
+                return UIEvent(
+                    type=NativeEventTypes.SESSION_END,
+                    timestamp=datetime.now(),
+                    data=data,
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+            
+            case "content_block:start":
+                block_type = data.get("block_type")
+                block_index = data.get("block_index")
+                event_id = str(uuid4())
+                
+                # Track thinking blocks for parent_event_id correlation
+                if block_type in {"thinking", "reasoning"}:
+                    self._thinking_events[block_index] = event_id
+                
+                return UIEvent(
+                    type=NativeEventTypes.CONTENT_BLOCK_START,
+                    timestamp=datetime.now(),
+                    data={"block_type": block_type, "block_index": block_index},
+                    event_id=event_id,
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+            
+            case "content_block:delta":
+                block_type = data.get("block_type", "text")
+                block_index = data.get("block_index")
+                delta = data.get("delta", {})
+                content = delta.get("text", "") if isinstance(delta, dict) else str(delta)
+                
+                return UIEvent(
+                    type=NativeEventTypes.CONTENT_BLOCK_DELTA,
+                    timestamp=datetime.now(),
+                    data={
+                        "block_type": block_type,
+                        "block_index": block_index,
+                        "content": content,
+                    },
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+            
+            case "thinking:delta":
+                text = data.get("text", "") or data.get("delta", {}).get("text", "")
+                return UIEvent(
+                    type=NativeEventTypes.THINKING_DELTA,
+                    timestamp=datetime.now(),
+                    data={"content": text, "block_type": "thinking"},
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+            
+            case "content_block:end":
+                block_index = data.get("block_index")
+                block = data.get("block", {})
+                block_type = block.get("type")
+                usage = data.get("usage")
+                
+                # Extract content based on block type
+                content = ""
+                if block_type in {"thinking", "reasoning"}:
+                    content = block.get("thinking", "") or block.get("text", "")
+                    parent_id = self._thinking_events.pop(block_index, None)
+                elif block_type == "text":
+                    content = block.get("text", "")
+                    parent_id = None
+                else:
+                    parent_id = None
+                
+                event = UIEvent(
+                    type=NativeEventTypes.CONTENT_BLOCK_END,
+                    timestamp=datetime.now(),
+                    data={
+                        "block_type": block_type,
+                        "block_index": block_index,
+                        "content": content,
+                        "usage": usage,
+                    },
+                    parent_event_id=parent_id,
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+                
+                return event
+            
+            case "tool:pre":
+                tool_name = data.get("tool_name", "unknown")
+                event_id = str(uuid4())
+                self._tool_events[tool_name] = (event_id, datetime.now())
+                
+                return UIEvent(
+                    type=NativeEventTypes.TOOL_PRE,
+                    timestamp=datetime.now(),
+                    data={
+                        "tool_name": tool_name,
+                        "tool_input": data.get("tool_input", {}),
+                        "call_id": data.get("tool_call_id") or data.get("call_id"),
+                    },
+                    event_id=event_id,
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+            
+            case "tool:post":
+                tool_name = data.get("tool_name", "unknown")
+                parent_id, start_time = self._tool_events.pop(tool_name, (None, None))
+                
+                result = data.get("tool_response", data.get("result", {}))
+                success = True
+                if isinstance(result, dict):
+                    success = result.get("success", True)
+                
+                event_data = {
+                    "tool_name": tool_name,
+                    "call_id": data.get("tool_call_id") or data.get("call_id"),
+                    "result": result,
+                    "success": success,
+                }
+                
+                if display.get("include_duration") and start_time:
+                    duration = (datetime.now() - start_time).total_seconds()
+                    event_data["duration_ms"] = int(duration * 1000)
+                
+                return UIEvent(
+                    type=NativeEventTypes.TOOL_POST,
+                    timestamp=datetime.now(),
+                    data=event_data,
+                    parent_event_id=parent_id,
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+            
+            case "orchestrator:complete":
+                content = data.get("content", "")
+                return UIEvent(
+                    type=NativeEventTypes.ORCHESTRATOR_COMPLETE,
+                    timestamp=datetime.now(),
+                    data={
+                        "content": content,
+                        "role": data.get("role", "assistant"),
+                        "turn_count": data.get("turn_count"),
+                        "status": data.get("status"),
+                        "orchestrator": data.get("orchestrator"),
+                    },
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+            
+            case _:
+                if event_name.startswith("error"):
+                    return UIEvent(
+                        type=NativeEventTypes.ERROR,
+                        timestamp=datetime.now(),
+                        data=data,
+                        session_id=session_id,
+                        agent_name=agent_name,
+                    )
+                return None
+    
+    def _handle_ui_friendly(
+        self,
+        event_name: str,
+        data: dict[str, Any],
+        pending_events: list[UIEvent] | None,
+        session_id: str | None,
+        agent_name: str | None,
+        display: dict[str, Any],
+    ) -> UIEvent | None:
+        """Handle event in ui_friendly mode - semantic UI event names."""
+        match event_name:
+            case "session:start":
+                return UIEvent(
+                    type=UIEventTypes.SESSION_START,
                     timestamp=datetime.now(),
                     data={"prompt": data.get("prompt", "")},
                     session_id=session_id,
@@ -316,7 +591,7 @@ class UIBridge:
             
             case "session:end":
                 return UIEvent(
-                    type=EventTypes.SESSION_END,
+                    type=UIEventTypes.SESSION_END,
                     timestamp=datetime.now(),
                     data=data,
                     session_id=session_id,
@@ -331,13 +606,19 @@ class UIBridge:
                     self._thinking_events[block_index] = event_id
                     
                     return UIEvent(
-                        type=EventTypes.THINKING_START,
+                        type=UIEventTypes.THINKING_START,
                         timestamp=datetime.now(),
                         data={"block_index": block_index},
                         event_id=event_id,
                         session_id=session_id,
                         agent_name=agent_name,
                     )
+                return None
+            
+            case "content_block:delta" | "thinking:delta":
+                # In ui_friendly mode, deltas are typically not emitted
+                # They're accumulated and emitted as thinking_end/message_end
+                # Return None to skip (apps wanting deltas should use native mode)
                 return None
             
             case "content_block:end":
@@ -352,7 +633,7 @@ class UIBridge:
                     thinking_text = block.get("thinking", "") or block.get("text", "")
 
                     event = UIEvent(
-                        type=EventTypes.THINKING_END,
+                        type=UIEventTypes.THINKING_END,
                         timestamp=datetime.now(),
                         data={
                             "block_index": block_index,
@@ -363,11 +644,10 @@ class UIBridge:
                         agent_name=agent_name,
                     )
 
-                    # Queue token usage event to emit after the primary event
-                    # This ensures correct ordering (thinking_end, then token_usage)
+                    # Queue token usage event
                     if usage and pending_events is not None:
                         pending_events.append(UIEvent(
-                            type=EventTypes.TOKEN_USAGE,
+                            type=UIEventTypes.TOKEN_USAGE,
                             timestamp=datetime.now(),
                             data={
                                 "input_tokens": usage.get("input_tokens", 0),
@@ -379,15 +659,10 @@ class UIBridge:
 
                     return event
 
-                # Note: TEXT blocks are NOT converted to MESSAGE_END here.
-                # MESSAGE_END is emitted by the message:end handler which receives
-                # the canonical event from the orchestrator with the complete response.
-                # This avoids duplicates and fragmentation from per-block events.
-
                 # Token usage on non-thinking blocks
                 if usage:
                     return UIEvent(
-                        type=EventTypes.TOKEN_USAGE,
+                        type=UIEventTypes.TOKEN_USAGE,
                         timestamp=datetime.now(),
                         data={
                             "input_tokens": usage.get("input_tokens", 0),
@@ -410,7 +685,7 @@ class UIBridge:
                     event_data["arguments"] = self._truncate(str(args))
                 
                 return UIEvent(
-                    type=EventTypes.TOOL_START,
+                    type=UIEventTypes.TOOL_START,
                     timestamp=datetime.now(),
                     data=event_data,
                     event_id=event_id,
@@ -432,12 +707,10 @@ class UIBridge:
                 else:
                     output = str(result)
 
-                # Start with any custom fields from data (for custom handlers)
-                # Exclude known Amplifier fields
+                # Preserve custom fields from data
                 known_fields = {"tool_name", "tool_response", "result", "tool_input", "session_id"}
                 event_data = {k: v for k, v in data.items() if k not in known_fields}
 
-                # Add standard fields
                 event_data["tool_name"] = tool_name
                 event_data["success"] = success
 
@@ -449,7 +722,7 @@ class UIBridge:
                     event_data["duration_ms"] = int(duration * 1000)
 
                 return UIEvent(
-                    type=EventTypes.TOOL_RESULT,
+                    type=UIEventTypes.TOOL_RESULT,
                     timestamp=datetime.now(),
                     data=event_data,
                     parent_event_id=parent_id,
@@ -458,13 +731,10 @@ class UIBridge:
                 )
 
             case "orchestrator:complete":
-                # Canonical event from orchestrator with complete assistant response
-                # This is the single source of truth for MESSAGE_END (no duplicates)
-                # Uses the standard Amplifier event instead of custom message:end
                 content = data.get("content", "")
                 if content:
                     return UIEvent(
-                        type=EventTypes.MESSAGE_END,
+                        type=UIEventTypes.MESSAGE_END,
                         timestamp=datetime.now(),
                         data={
                             "content": content,
@@ -479,10 +749,9 @@ class UIBridge:
                 return None
 
             case _:
-                # Handle error events
                 if event_name.startswith("error"):
                     return UIEvent(
-                        type=EventTypes.ERROR,
+                        type=UIEventTypes.ERROR,
                         timestamp=datetime.now(),
                         data=data,
                         session_id=session_id,
@@ -503,9 +772,9 @@ class UIBridge:
             return text[:max_len] + f"... ({len(text) - max_len} more chars)"
         return text
     
-    # ─────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────────────
     # Event Emission
-    # ─────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────────────
     
     async def emit(self, event: UIEvent) -> None:
         """Emit a UIEvent through the adapter.
