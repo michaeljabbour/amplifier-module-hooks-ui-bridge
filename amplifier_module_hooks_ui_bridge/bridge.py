@@ -463,6 +463,19 @@ class UIBridge:
                     agent_name=agent_name,
                 )
             
+            case "thinking:final":
+                return UIEvent(
+                    type=NativeEventTypes.THINKING_FINAL,
+                    timestamp=datetime.now(),
+                    data={
+                        "content": data.get("thinking", "") or data.get("content", ""),
+                        "signature": data.get("signature"),
+                        "block_type": "thinking",
+                    },
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+            
             case "content_block:end":
                 block_index = data.get("block_index")
                 block = data.get("block", {})

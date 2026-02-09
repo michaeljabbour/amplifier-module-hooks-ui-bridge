@@ -32,6 +32,7 @@ class NativeEventTypes:
     
     # Thinking/reasoning streaming
     THINKING_DELTA = "thinking:delta"
+    THINKING_FINAL = "thinking:final"
     
     # Tool execution
     TOOL_PRE = "tool:pre"

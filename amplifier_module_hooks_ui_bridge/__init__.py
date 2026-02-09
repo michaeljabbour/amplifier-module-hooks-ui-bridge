@@ -317,6 +317,10 @@ async def mount(coordinator: Any, config: dict[str, Any]) -> None:
         await _bridge.handle_event("thinking:delta", data)
         return HookResult(action="continue")
     
+    async def on_thinking_final(event: str, data: dict) -> HookResult:
+        await _bridge.handle_event("thinking:final", data)
+        return HookResult(action="continue")
+    
     async def on_tool_pre(event: str, data: dict) -> HookResult:
         await _bridge.handle_event("tool:pre", data)
         return HookResult(action="continue")
@@ -337,6 +341,7 @@ async def mount(coordinator: Any, config: dict[str, Any]) -> None:
     coordinator.hooks.register("content_block:delta", on_content_block_delta)
     coordinator.hooks.register("content_block:end", on_content_block_end)
     coordinator.hooks.register("thinking:delta", on_thinking_delta)
+    coordinator.hooks.register("thinking:final", on_thinking_final)
     coordinator.hooks.register("tool:pre", on_tool_pre)
     coordinator.hooks.register("tool:post", on_tool_post)
     coordinator.hooks.register("orchestrator:complete", on_orchestrator_complete)
