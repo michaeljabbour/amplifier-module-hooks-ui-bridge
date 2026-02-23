@@ -95,6 +95,13 @@ class UIEventTypes:
     COMMAND_RESULT = "command_result"
     COMMAND_ERROR = "command_error"
 
+    # Agent/delegation events (child session forwarding)
+    AGENT_START = "agent_start"
+    AGENT_DELTA = "agent_delta"
+    AGENT_THINKING = "agent_thinking"
+    AGENT_TOOL = "agent_tool"
+    AGENT_COMPLETE = "agent_complete"
+
 
 # Backwards compatibility: EventTypes is alias for UIEventTypes
 # This maintains compatibility with existing code using EventTypes
