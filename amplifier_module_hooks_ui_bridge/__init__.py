@@ -36,8 +36,6 @@ __version__ = "0.2.0"
 import logging
 from typing import Any, Callable
 
-from amplifier_core.models import HookResult
-
 from .adapters import (
     MockAdapter,
     QueueAdapter,
@@ -293,58 +291,7 @@ async def mount(coordinator: Any, config: dict[str, Any]) -> None:
         _bridge.set_adapter(adapter)
     
     # Register hook handlers with coordinator
-    async def on_session_start(event: str, data: dict) -> HookResult:
-        await _bridge.handle_event("session:start", data)
-        return HookResult(action="continue")
-    
-    async def on_session_end(event: str, data: dict) -> HookResult:
-        await _bridge.handle_event("session:end", data)
-        return HookResult(action="continue")
-    
-    async def on_content_block_start(event: str, data: dict) -> HookResult:
-        await _bridge.handle_event("content_block:start", data)
-        return HookResult(action="continue")
-    
-    async def on_content_block_delta(event: str, data: dict) -> HookResult:
-        await _bridge.handle_event("content_block:delta", data)
-        return HookResult(action="continue")
-    
-    async def on_content_block_end(event: str, data: dict) -> HookResult:
-        await _bridge.handle_event("content_block:end", data)
-        return HookResult(action="continue")
-    
-    async def on_thinking_delta(event: str, data: dict) -> HookResult:
-        await _bridge.handle_event("thinking:delta", data)
-        return HookResult(action="continue")
-    
-    async def on_thinking_final(event: str, data: dict) -> HookResult:
-        await _bridge.handle_event("thinking:final", data)
-        return HookResult(action="continue")
-    
-    async def on_tool_pre(event: str, data: dict) -> HookResult:
-        await _bridge.handle_event("tool:pre", data)
-        return HookResult(action="continue")
-    
-    async def on_tool_post(event: str, data: dict) -> HookResult:
-        await _bridge.handle_event("tool:post", data)
-        return HookResult(action="continue")
-
-    async def on_orchestrator_complete(event: str, data: dict) -> HookResult:
-        """Handle orchestrator:complete event with complete response content."""
-        await _bridge.handle_event("orchestrator:complete", data)
-        return HookResult(action="continue")
-
-    # Register handlers
-    coordinator.hooks.register("session:start", on_session_start)
-    coordinator.hooks.register("session:end", on_session_end)
-    coordinator.hooks.register("content_block:start", on_content_block_start)
-    coordinator.hooks.register("content_block:delta", on_content_block_delta)
-    coordinator.hooks.register("content_block:end", on_content_block_end)
-    coordinator.hooks.register("thinking:delta", on_thinking_delta)
-    coordinator.hooks.register("thinking:final", on_thinking_final)
-    coordinator.hooks.register("tool:pre", on_tool_pre)
-    coordinator.hooks.register("tool:post", on_tool_post)
-    coordinator.hooks.register("orchestrator:complete", on_orchestrator_complete)
+    _bridge.register_on_coordinator(coordinator)
 
     logger.info(f"Mounted hooks-ui-bridge v{__version__} with {transport_type} transport (event_mode={_bridge.event_mode})")
 
