@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from .events import NativeEventTypes, UIEventTypes
 from .schema import UIEvent
+from .state import StateManager
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,7 @@ class UIBridge:
         self._command_handlers: dict[str, Callable] = {}
         self._history: list[UIEvent] = []
         self._adapter = None
+        self._state_manager = StateManager()
     
     @property
     def event_mode(self) -> str:
@@ -220,6 +222,75 @@ class UIBridge:
             return fn
         return decorator
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # Coordinator Registration
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def register_on_coordinator(
+        self,
+        coordinator,
+        is_child: bool = False,
+        session_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> list[Callable]:
+        """Register event handlers on a coordinator's hooks.
+
+        For root coordinators (is_child=False), registers handlers that
+        forward events through the bridge's processing pipeline.
+
+        For child coordinators (is_child=True), creates a SessionState
+        and wraps handlers to inject child session metadata into event data.
+
+        Args:
+            coordinator: Object with .hooks.register(event, handler) API
+            is_child: Whether this is a child/delegate session
+            session_id: Session ID (used for child state tracking)
+            agent_name: Agent name for child session
+
+        Returns:
+            List of callables -- call each to unregister the handler
+        """
+        from amplifier_core.models import HookResult
+
+        # Standard events to register (matches mount() in __init__.py)
+        hook_events = [
+            "content_block:start",
+            "content_block:delta",
+            "content_block:end",
+            "thinking:delta",
+            "thinking:final",
+            "tool:pre",
+            "tool:post",
+            "session:start",
+            "session:end",
+            "orchestrator:complete",
+        ]
+
+        # Set up child session state
+        if is_child and session_id:
+            state = self._state_manager.get_or_create(session_id)
+            if agent_name:
+                state.agent_name = agent_name
+
+        # Build a single handler that optionally injects child metadata
+        _is_child_session = is_child and session_id is not None
+
+        async def _event_handler(event: str, data: dict) -> HookResult:
+            if _is_child_session:
+                data["_child_session_id"] = session_id
+                data["_child_agent_name"] = agent_name
+            await self.handle_event(event, data)
+            return HookResult(action="continue")
+
+        unregister_callables: list[Callable] = []
+
+        for event_name in hook_events:
+            unreg = coordinator.hooks.register(event_name, _event_handler)
+            if unreg is not None:
+                unregister_callables.append(unreg)
+
+        return unregister_callables
+
     # ───────────────────────────────────────────────────────────────────────────
     # Pipeline Customization
     # ───────────────────────────────────────────────────────────────────────────

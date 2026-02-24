@@ -304,3 +304,134 @@ class TestUIBridgeConfiguration:
         bridge = UIBridge(config={"preset": "verbose"})
         
         assert bridge.config["events"] == ["*"]
+
+
+# Standard hook events that register_on_coordinator should register
+STANDARD_HOOK_EVENTS = {
+    "content_block:start",
+    "content_block:delta",
+    "content_block:end",
+    "thinking:delta",
+    "thinking:final",
+    "tool:pre",
+    "tool:post",
+    "session:start",
+    "session:end",
+    "orchestrator:complete",
+}
+
+
+class TestRegisterOnCoordinator:
+    """Tests for UIBridge.register_on_coordinator()."""
+
+    @pytest.fixture
+    def mock_coordinator(self):
+        """Mock coordinator with hooks that track registrations."""
+
+        class MockHooks:
+            def __init__(self):
+                self.registered: dict[str, list] = {}
+
+            def register(self, event, handler, priority=None, name=None):
+                self.registered.setdefault(event, []).append(handler)
+
+                def unregister():
+                    if event in self.registered:
+                        self.registered[event] = [
+                            h for h in self.registered[event] if h is not handler
+                        ]
+
+                return unregister
+
+        class MockCoordinator:
+            def __init__(self):
+                self.hooks = MockHooks()
+
+        return MockCoordinator()
+
+    @pytest.fixture
+    def bridge_with_adapter(self):
+        """Create a UIBridge with connected mock adapter."""
+        adapter = MockAdapter()
+        bridge = UIBridge()
+        bridge.set_adapter(adapter)
+        return bridge, adapter
+
+    def test_non_child_registers_all_standard_events(
+        self, bridge_with_adapter, mock_coordinator
+    ):
+        """is_child=False registers handlers for all 10 standard hook events."""
+        bridge, _ = bridge_with_adapter
+        bridge.register_on_coordinator(mock_coordinator)
+        assert set(mock_coordinator.hooks.registered.keys()) == STANDARD_HOOK_EVENTS
+
+    def test_child_registers_events_and_creates_session_state(
+        self, bridge_with_adapter, mock_coordinator
+    ):
+        """is_child=True registers handlers AND creates SessionState."""
+        bridge, _ = bridge_with_adapter
+
+        bridge.register_on_coordinator(
+            mock_coordinator,
+            is_child=True,
+            session_id="parent-abc_explorer",
+            agent_name="explorer",
+        )
+
+        # All standard events registered
+        assert set(mock_coordinator.hooks.registered.keys()) == STANDARD_HOOK_EVENTS
+
+        # SessionState created with correct fields
+        state = bridge._state_manager.get("parent-abc_explorer")
+        assert state is not None
+        assert state.session_id == "parent-abc_explorer"
+        assert state.agent_name == "explorer"
+
+    def test_unregister_callables_remove_handlers(
+        self, bridge_with_adapter, mock_coordinator
+    ):
+        """Returned callables actually unregister all handlers."""
+        bridge, _ = bridge_with_adapter
+
+        unregisters = bridge.register_on_coordinator(mock_coordinator)
+        assert len(unregisters) == len(STANDARD_HOOK_EVENTS)
+        assert all(callable(u) for u in unregisters)
+
+        # Unregister everything
+        for unreg in unregisters:
+            unreg()
+
+        # All handler lists should be empty
+        for event, handlers in mock_coordinator.hooks.registered.items():
+            assert handlers == [], f"Handler still registered for {event}"
+
+    @pytest.mark.asyncio
+    async def test_child_handler_injects_metadata(
+        self, bridge_with_adapter, mock_coordinator
+    ):
+        """Child handler injects _child_session_id and _child_agent_name into event data."""
+        bridge, adapter = bridge_with_adapter
+        await adapter.connect()
+
+        bridge.register_on_coordinator(
+            mock_coordinator,
+            is_child=True,
+            session_id="child-sess-123",
+            agent_name="bug-hunter",
+        )
+
+        # tool:pre sets up correlation state in the bridge
+        pre_handler = mock_coordinator.hooks.registered["tool:pre"][0]
+        await pre_handler("tool:pre", {"tool_name": "bash", "tool_input": {}})
+
+        # tool:post in ui_friendly mode preserves custom fields from data
+        post_handler = mock_coordinator.hooks.registered["tool:post"][0]
+        await post_handler(
+            "tool:post",
+            {"tool_name": "bash", "tool_response": {"success": True, "output": "ok"}},
+        )
+
+        result_event = adapter.get_last_event_of_type("tool_result")
+        assert result_event is not None
+        assert result_event.data["_child_session_id"] == "child-sess-123"
+        assert result_event.data["_child_agent_name"] == "bug-hunter"
